@@ -1,12 +1,10 @@
-# PLONK square tutorial (from scratch)
+# PLONK x^2 tutorial (from scratch)
 
 Build a toy PLONK prover and verifier by hand, starting from the simplest useful statement:
 
 > Prove knowledge of a private `x` such that `x * x = y`, where `y` is public.
 
-This repository contains **lesson documents only**. You write all code yourself.
-
-Pedagogy follows the trace-and-gates viewpoint in [All you wanted to know about Plonk](https://blog.lambdaclass.com/all-you-wanted-to-know-about-plonk/) by LambdaClass.
+Working from the initial commit 2f1a3ed03af155a2a919e62577f8c487c2b9df08, the repository contains **lesson documents only**. You write all code yourself.
 
 ## Lessons
 
@@ -46,11 +44,20 @@ plonk-square-tutorial/
 └── tests/
 ```
 
+## How I used with AI with the tutorial
+
+- have AI write the lessons in `docs/` and write all the code yourself to ensure you understand each lesson
+- ask AI follow up/clarifying questions as you go through each lesson
+- ask AI to write the tests for you too to confirm your implementation is correct after each lesson
+- ask for adivce on the code organization/layout after each lesson (since it understands the full scope of the tutorial)
+
 ## How to use each lesson
 
-1. Read the background until the concepts feel concrete (draw the tables on paper).
+1. Read the background until the concepts feel concrete.
 2. Implement the **Your task** section in your own modules.
 3. Run the tests described in **Run it**.
-4. Use **Checkpoint** before moving on.
+4. onward! next lesson!
 
 Lesson 07 completes the tutorial with `prove()` and `verify()`.
+
+Pedagogy follows the trace-and-gates viewpoint in [All you wanted to know about Plonk](https://blog.lambdaclass.com/all-you-wanted-to-know-about-plonk/) by LambdaClass.
