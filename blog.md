@@ -254,6 +254,7 @@ The main thing we need to understand is that for polynomials, the factor theorem
 - Another way of saying this is: **if f(a) = 0, then there exists a quotient q(x) such that, f(X) = (X − a) · q(X) for some polynomial q(X) = f(X) / (X − a)**
 - Since we want to prove a polynomail `G(X) = 0` for all `x ∈ H` AND since `Z_H(X) = Π_{i=0}^{N-1} (X - ω^i)` i.e, the multiplication of `N` terms which are zero across all `x ∈ H`
   - *then* if we find a `Q(X)` such that `G(X) = Z_H(X) · Q(X)` as polynomials, then G(x) = 0 for all x ∈ H — so every gate constraint in G is satisfied at once.
+- Honest witness → division succeeds; broken witness → nonzero remainder
 
 - checking the polynomial equality can be done as follows:
 
@@ -270,111 +271,131 @@ constraint_holds = ( # If true, G(x) = 0 for all x ∈ H
 
 ---
 
-## Part 4 — Copies as a permutation polynomial
-- Placement domain `H_pl`: one point per trace cell (row × column), not just per row
-- Witness polynomial `W(X)`: values at all placements
-- Permutation `σ`: where each placement's value must also appear
-- Permuted witness `W^σ(X)`: values after applying `σ`
-- Copy constraint polynomial: `C(X) = W(X) − W^σ(X)`
-- Valid copies ⟺ `C(x) = 0` for all `x ∈ H_pl`
-- Placement vanishing poly: `Z_pl(X) = X^{|H_pl|} − 1`
-- Contrast: gate lives on 4 points; copies live on 12 — different domains
+## Part 4 — Copy constraints as a permutation polynomial
+
+- now we need to represent our copy constraints as a polynomial
+- the way we do this is with a permutation σ, which **reorders the traces so copies line up**
+- for example, if we have the same WIRE_ID at p0 and p1, we use a cycle between the values, then `σ(p0) = p1` and `σ(p1) = p0` (a cycle of length 2)
+- our new reordered set `w^σ` would have `p1` where `p0` was and `p0` where `p1` was
+
+For our square circuit, only wire 0 has two placements (so only one nontrivial cycle):
+
+```
+         w (values at placements)
+placement p (index values):   0     1     2     3 …
+value w[p]  (values in w):    7     7    49     0 …
+
+         σ (where to look for the copy)
+σ(p) (re-ordered indexs):     1     0     2     3 …
+
+         w^σ (values after following σ)
+w[σ(p)]:       7     7    49     0 …
+```
+
+Where:
+- **`w`** — flat list of trace values at each placement (length 12)
+- **`σ`** — permutation of placement indices; which cycles cells that share a wire ID
+- **`w^σ`** — same values, reordered: `w^σ[p] = w[σ(p)]`
+- Copy check: **`w[p] = w^σ[p]` for every placement `p`**
+
+Notice how if the copy constraints are held, then `w[σ] == w`
+
+we can then follow the procedure we using in the previous sections and create a polynomial for these two lists using the values as y-values and the roots of unity as x-values, and then ensure equality holds across the domain, that is: 
+- `W(X) = W^σ(X)`
+- `W(X) - W^σ(X) = 0`
+- `W(X) - W^σ(X) = C(X)`
+
+we then compute the vanishing poly: `Z_cp(X) = X^{12} − 1` and require the constraints to hold:
+
+- `C(X) = Z_cp(X) · Q_cp(X)` (where `_cp` stands for copy)
+
+and to prove the equality holds, we request a valid quotient polynomial `Q_cp(X)`, and do the same verification as the last section
+
+NOTE: here `C(X)` is the **copy constraint** polynomial `W(X) − W^σ(X)`, not the trace column `C(X)`. Below we write the copy constraint as `C_cp(X)` when both appear in the same proof.
 
 ---
 
-## Part 5 — From pointwise zeros to exact division (quotients)
-- If `F` is zero on every domain point, then `Z(X)` divides `F(X)` in `𝔽_p[X]`
-- Quotient: `Q(X) = F(X) / Z(X)` (exact division, remainder zero)
-- Gate quotient: `Q_G(X) = G(X) / Z_H(X)`
-- Copy quotient: `Q_C(X) = C(X) / Z_pl(X)`
-- Verifier identity (algebraic): `Z(X)·Q(X) == F(X)` as polynomials
-- Honest witness → division succeeds; broken witness → nonzero remainder
-- On valid square circuit, copy constraint is often identically zero → `Q_C = 0`
+## Efficient Communication: KZG
 
----
-
-## Part 6 — Hiding polynomials with commitments (KZG intuition)
 - Problem: sending all polynomial coefficients is huge for real traces
-- Trusted setup: secret `τ`, publish powers `1, τ, τ², …`
-- Commitment: `C = f(τ)` — one value hides full polynomial (toy model)
-- Production: same idea in an elliptic curve group (`f(τ)·G`)
-- Verifier never sees coefficients; checks equations via openings
+- Solution: KZG commitments
+  - this lets a prover say "I have a polynomial `f`" and later prove "`f(z) = y`" without sending all coefficients
+- first we commit the polynomial at a secret setup point `τ` (unknown to prover and verifier after setup)
+- **SETUP (trusted):** publish powers of `τ` in a group with generator `G`  
+  - `SRS = { G, τG, τ²G, τ³G, …, τ^{D-1}G }`  
+  - nobody keeps `τ` after this (or the scheme is broken)
+- **PROVER — commit:** hide the polynomial as one group element  
+  - `C = c₀·G + c₁·(τG) + c₂·(τ²G) + … = f(τ)·G`  
+  - NOTE: same as evaluating `f(X) = c₀ + c₁·X + c₂·X² + …` at `X = τ`, without revealing `τ` or the coeffs  
+- **VERIFIER → PROVER:** chooses a random challenge point `z` and sends it to the prover  
+  - (or we can use Fiat–Shamir to have a non-interactive `z` value)
+- **PROVER — open at `z`:** prove `f(z) = y` without sending all coeffs  
+
+  - the prover must supply a valid quotient (with no remainder) for `f(x) - y / (x - z)`
+    - notice the top is `g(x) = f(x) - y` which we know `z` is a root of since `g(z) = f(z) - y = y - y = 0`
+    - since its a root by the factor theorem we know `(x - z)` is a factor of `g(x)`
+    - and therefore there exists a quotient `g(x) / (x - z)` without remainder 
+    - and this quotient would only be feasible to compute if the prover knew `f(x)`
+  - so the prover computes `y` and then builds the quotient `q(X) = (f(X) − y) / (X − z)`
+  - then the prover commits to the quotient: `π = q(τ)·G`
+  - and sends the opening `(y, π)` to the verifier
+- **VERIFIER — check opening:** does not know `τ` or the coeffs, only `C`, `z`, `y`, `π`  
+  - Algebraic identity (evaluate `f(X) − y = q(X)·(X − z)` at `X = τ`):  
+    ```
+    f(τ) − y = q(τ) · (τ − z)
+    <-> f(τ) − y = (f(τ) - y) / (τ - z) · (τ − z)
+    <-> f(τ) − y = (f(τ) - y)
+    <-> 0 = 0
+    ```  
+  
+- **Why this works**  
+  - honest prover who knows `f` and sets `y = f(z)` can always form exact `q` and pass  
+  - cheater with wrong `y` has nonzero remainder → no polynomial `q` → can't produce a valid `π` except with negligible probability  
+  - coefficients stay hidden: only `C`, `y`, and `π` leave the prover  
+
+```python
+def prove_open(coeffs, z, setup):
+    y = eval_poly(coeffs, z) # f(z)
+    q, r = div_poly(sub_poly(coeffs, [y]), [mod(-z), 1])  # (f - y) / (X - z)
+    assert r == [0]
+    pi = eval_poly(q, setup["tau"]) # q(τ)
+    return y, pi
+
+def verify_open(C, z, y, pi, setup):
+    return (C - y) == (pi * (setup["tau"] - z))
+```
+
+## PLONK Prove/Verify Pipeline
+
+To put it together, we run KZG on every polynomial we built, then check gate and copy identities **at one challenge point `z`**.
+
+### Polynomials we commit
+
+| Commitment | Polynomial | Definition |
+|------------|------------|------------|
+| `Commit(S)` | `S(X)` | selector column |
+| `Commit(A)` | `A(X)` | left input column |
+| `Commit(B)` | `B(X)` | right input column |
+| `Commit(C)` | `C(X)` | output column |
+| `Commit(G)` | `G(X)` | `S(X)·(A(X)·B(X) − C(X))` |
+| `Commit(Q)` | `Q(X)` | gate quotient: `G(X) = Z_H(X) · Q(X)` |
+| `Commit(C_cp)` | `C_cp(X)` | copy constraint: `W(X) − W^σ(X)` (Part 4’s `C(X)`) |
+| `Commit(Q_cp)` | `Q_cp(X)` | copy quotient: `C_cp(X) = Z_cp(X) · Q_cp(X)` |
+
+Vanishing polys (not committed — verifier can evaluate them):
+
+- `Z_H(X) = X^4 − 1` (zero on row domain `H`)
+- `Z_cp(X) = X^{12} − 1` (zero on placement domain)
+
+- we then follow the ZKG algorithm for each of the polynomials, proving each polynomial is honest without revealing the value itself
 
 ---
 
-## Part 7 — Opening at a random point
-- Verifier challenges evaluation point `z`
-- Prover sends `y = f(z)` and proof `π = q(τ)` where `q(X) = (f(X) − y)/(X − z)`
-- Factor theorem: exact division iff `f(z) = y`
-- Verifier check: `C − y = π · (τ − z)` (toy); pairings in production
-- Why hidden `τ` matters: can't fake `π` without knowing the polynomial
-- Cheater with wrong `y` fails except with negligible probability
-
----
-
-## Part 8 — Fiat–Shamir: who picks `z`?
-- Interactive version: verifier sends random `z` after commitments
-- Non-interactive: hash commitments + public inputs → `z`
-- Transcript binding: changing any commitment changes `z`
-- Soundness requirement: `z` should lie **outside** trace/placement domains
-- Why: if `Z(z) = 0`, quotient identity `Z(z)·Q(z) = F(z)` becomes trivial
-
----
-
-## Part 9 — Full prove / verify protocol (put it together)
-- **Prover**
-  - Build witness table
-  - Check gates, copies, public inputs locally
-  - Commit to trace columns + quotients + constraint polys
-  - Hash transcript → `z`
-  - Open every committed polynomial at `z`
-  - Send `Proof = {commitments, openings, public inputs, z}`
-- **Verifier**
-  - Recompute `z` from transcript
-  - Verify each KZG opening
-  - Check gate: `Z_H(z)·Q_G(z) == G(z)`
-  - Check copy: `Z_pl(z)·Q_C(z) == C(z)`
-  - Cross-check: `G(z) == S(z)·(A(z)·B(z) − C(z))`
-  - Confirm public inputs match
-- What stays private: `x` (and full trace)
-- What stays public: `y`, commitments, openings
-
----
-
-## Part 10 — How this differs from "real" PLONK (honest map)
+## How this differs from "real" PLONK (honest map)
 - General gate gadget: `q_L·A + q_R·B + q_M·AB + q_O·C + q_C` (five selector polys in VK)
-- Tutorial shortcut: one mul gate → `S·(A·B − C)`
-- Real copy argument: grand product polynomial + challenges `β, γ` (not explicit `W − W^σ`)
-- Constraint folding: random `α` combines many constraints into one grand quotient
+- Tutorial shortcut: one mul gate → `G(X) = S(X)·(A(X)·B(X) − C(X))`
+- Real copy argument: grand product polynomial + challenges `β, γ` (not explicit `W − W^σ` / `C_cp`)
+- Constraint folding: random `α` combines `G`, `C_cp`, … into one grand quotient (we keep `Q` and `Q_cp` separate)
 - Curves + pairings instead of field-element `f(τ)`
 - FFT/NTT for `N = 2^{20}`, not `N = 4`
 - Same skeleton everywhere: **trace → constraints → quotients → commit → challenge → open → verify**
-
----
-
-## Part 11 — Mental model cheatsheet (one screen)
-- Trace = computation written as a table
-- Polynomials = columns interpolated on a domain
-- Constraints = polynomials that must vanish on that domain
-- Quotients = divide by vanishing poly when constraints hold
-- Commitments = hide polynomials, keep algebraic structure
-- Openings = prove one evaluation without revealing coeffs
-- Fiat–Shamir = make challenges non-interactive
-- Proof = commitments + openings + public inputs, not the witness
-
----
-
-## Part 12 — What to build next (optional CTA)
-- Implement the toy version in Python (link to tutorial repo structure)
-- Swap toy KZG for Halo2 / arkworks / gnark
-- Add a second gate type (addition) → need full `q_L…q_C`
-- Scale `N` and add FFT
-- Same statement in Noir → Barretenberg for a real proof
-
----
-
-## Appendix bullets (sidebar / footnotes)
-- Notation table: `H, ω, Z_H, τ, C, π, z, σ, Q_G, Q_C`
-- Common mistakes: wrong vanishing domain, forgetting selectors on padding, `z ∈ H`, mixing up quotient vs selector `Q`
-- Further reading: PLONK paper, KZG10, LambdaClass post, Halo2 book
-- Diagram list to commission: trace table, wire IDs, domain map, commit/open flow, verifier equation
