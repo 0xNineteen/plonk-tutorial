@@ -2,9 +2,7 @@
 
 In this tutorial we're gonna cover how the ZK proof scheme PLONK works. We are going to prove the claim: we know `x` such that `x · x = y`, without revealing `x`. While this is a very simple example, it serves as a good starting point to understand the core concepts of PLONK.
 
----
-
-## Part 1 — Computation as a table (execution trace and gate constraints)
+## Computation as a table (execution trace and gate constraints)
 
 First we represent our equation as a circuit, where each variable will become a wire.
 
@@ -67,7 +65,7 @@ Using this matrix, the prover's claim is: **every row of the trace satisfies `s_
 
 To verify this, we can check each row's gate equality in a loop. Pretty straightforward.
 
-## Part 2 — Identical wires must agree (copy constraints)
+## Copy Constraints
 
 Notice in our equation `a` and `b` both represent the same variable, `x`, but we never validate this using gate checks.
 
@@ -100,7 +98,7 @@ PUBLIC_WIRES = (1,) # wire_id of y
 
 To verify the constraint holds, we loop through each unqiue WIRE_ID, find all `w_id_indexs` which match, and ensure they all hold the same values in the trace. Along with checking the public inputs match.
 
-## Proof and Verification of Gate and Copy Constraints
+## Proof and Verification
 
 While theres no zero-knowledge yet, we can prove all constraints hold by checking the trace's gates and copy constraints directly:
 
@@ -165,9 +163,7 @@ def check(circuit, public_inputs):
 
 This is an **honest verifier with full trace access** — the prover sends the whole table, verifier runs the three checks. 
 
----
-
-## Part 3 — One polynomial per column
+## Polynomials
 
 While this approach works for simple circuits, for larger circuits, we need a better approach than loops. To accomplish this, we'll use polynomials.
 
@@ -225,7 +221,7 @@ def check_poly_trace(circuit, public_inputs):
 
 Now, with a little more work and introducing a few more concepts, *we can actually do it with a single evaluation*.
 
-## Vanishing polynomial
+### Vanishing polynomial
 
 First we need to understand the vanishing polynomial `Z_H`.
 
@@ -245,7 +241,7 @@ In our example, `N = 4`, so:
 Z_H(X) = X^4 - 1
 ```
 
-## The Factor Theorem and The Quotient Polynomial
+### The Factor Theorem and The Quotient Polynomial
 
 The next thing we need to understand, is that the factor theorem states: 
 > **for a polynomial f(x): f(a) = 0 if and only if (x−a) is a factor of f(x)**
@@ -272,9 +268,7 @@ constraint_holds = ( # If true, G(x) = 0 for all x ∈ H
 )
 ```
 
----
-
-## Part 4 — Copy constraints as a permutation polynomial
+### Copy constraints as a permutation polynomial
 
 Next, we need to represent our copy constraints as polynomials.
 
@@ -327,8 +321,6 @@ We compute the vanishing poly: `Z_cp(X) = X^{12} − 1` and require the constrai
 And to prove the equality holds, we request a valid quotient polynomial `Q_cp(X)`.
 
 *Note:* `C_cp(X)` is the **copy constraint** polynomial `W(X) − W^σ(X)`, not the trace column `C(X)`.
-
----
 
 ## KZG Commitments
 
