@@ -23,7 +23,7 @@ flowchart LR
 - `x` is private — the prover knows it, the verifier must not learn it
 - `y` is public — the verifier supplies `49` and checks the proof against it
 
-We can also organize this circuit in a more general/flexible way, using to follow the equation: 
+We can rewrite the same claim in a more general gate form, as follows: 
 - `x * x = y`
 - `<-> a * b = c`
 - `<-> a * b - c = 0`
@@ -31,8 +31,8 @@ We can also organize this circuit in a more general/flexible way, using to follo
 
 Now we have a general multiplication gate representation where:
 - `a` and `b` are two *cells* / *inputs* (which both carry wire `x`)
-- `c` is the output (which carrys wire `y`) 
-- and `s_mul` is the selector (a gate that enables/disables the rest of the equation, in our example it will always be enabled)
+- `c` is the output (which carries wire `y`)
+- `s_mul` is a **selector** — a column value (not a gate) that enables or disables the rest of the equation. In our example it is always `1` on the active row.
 
 *Note:* the full PLONK uses a more sophisticated version of this equation to support other operations, but for learning purposes, understanding a single multiplication gate is a great starting place.
 
@@ -49,7 +49,7 @@ flowchart LR
   mul --> c["c = y (public)"]
 ```
 
-We can also represent our circuit as a *computer trace* using a matrix where each row is the 'state' of the computer program over time, and the validness of each row is a *gate check*, for example:
+We can also represent the circuit as an *execution trace*: a matrix where each row is one gate step, and validity of that row is a *gate check*:
 
 | `s_mul` | `a` | `b` | `c` | gate check `s · (a·b − c)` |
 |---------|-----|-----|-----|----------------------------|
@@ -58,10 +58,10 @@ We can also represent our circuit as a *computer trace* using a matrix where eac
 | 0 | 0 | 0 | 0 | `0 · (anything) = 0` ✓ |
 | 0 | 0 | 0 | 0 | `0 · (anything) = 0` ✓ |
 
-- Row 0 is the only active gate: it enforces `s_mul · (a · b) = c`, i.e. `7 · 7 = 49`
+- Row 0 is the only active gate: it enforces `s_mul · (a·b − c) = 0`, i.e. `7 · 7 = 49`
 - Rows 1–3 are *padding*: `s_mul = 0` turns the gate off, so those values don't matter
 
-*Note:* in our example, since we only have one gate/state, we only care about the first row (the other rows are `padded`) but notice it would support much more complicated computations
+*Note:* we only have one active gate here; the extra rows are padding so the domain size is a power of two. The same table shape supports much larger circuits.
 
 Using this matrix, the prover's claim is: **every row of the trace satisfies `s_mul · (a·b − c) = 0`**
 
@@ -71,9 +71,9 @@ To verify this, we can check each row's gate equality in a loop. Pretty straight
 
 Notice in our equation `a` and `b` both represent the same variable, `x`, but we never validate this using gate checks.
 
-To accomplish this we'll introduce something called 'copy constraints', which first defines which variables (`a` and `b`) need to be the same in the trace, and then validate it, alongside the gate check.
+To fix that we introduce copy constraints which declare what cells must hold the same wire and then check those equalities alongside the gate checks.
 
-We'll define a `WIRE_IDS` variable as a flat N*M vector represeting our trace and its values define the 'wire id' of each value in the trace, for example:
+We'll define `WIRE_IDS` as a flat length-`N·M` vector over the trace. Each entry is the **wire id** of that cell (or `-1` for padding):
   
 | w_id_index | cell | wire ID | trace value | copy rule |
 |-----------|------|---------|---------------------------|-----------|
@@ -102,7 +102,7 @@ To verify the constraint holds, we loop through each unqiue WIRE_ID, find all `w
 
 ## Proof and Verification of Gate and Copy Constraints
 
-While theres no zero-knowledge yet, we can prove all constraints holds by checking the trace's gates and copy constraints directly:
+While theres no zero-knowledge yet, we can prove all constraints hold by checking the trace's gates and copy constraints directly:
 
 **1. Gate check** — loop over every row:
 
@@ -235,9 +235,9 @@ On a multiplicative subgroup of order `N` we can define the vanishing polynomial
 Z_H(X) = Π_{i=0}^{N-1} (X - ω^i) = X^N - 1
 ```
 
-*Note:* the Vanishing polynomial factors to `Z_H(X) = X^N − 1` is zero exactly on `H` when using the roots of unity `ω^i`, which is why we chose them instead of a simpler `{0, 1, 2, 3}`.
+*Note:* when `H` is the set of `N`-th roots of unity, the product collapses to `Z_H(X) = X^N − 1`. That polynomial is zero **exactly** on `H`, which is why we chose roots of unity instead of a simpler domain like `{0, 1, 2, 3}`.
 
-**Notice how `Z_H(x) = 0` for every `x ∈ H` and `Z_H(x) ≠ 0` for typical `x ∉ H`.** This will come in handy.
+**Notice how `Z_H(x) = 0` for every `x ∈ H`, and `Z_H(x) ≠ 0` for every `x ∉ H` (in the field).** This will come in handy.
 
 In our example, `N = 4`, so:
 
@@ -279,6 +279,8 @@ constraint_holds = ( # If true, G(x) = 0 for all x ∈ H
 Next, we need to represent our copy constraints as polynomials.
 
 The way we do this is with a permutation σ, which **reorders the traces so copies are reorganized into a cycle**.
+
+*Note:* production PLONK does **not** prove copies by interpolating `w` and `w∘σ` and checking `W(X) = W^σ(X)`. It uses a **grand-product / permutation argument** (challenges `β, γ`). Below is a didactic stand-in so we can reuse the vanishing/quotient pattern.
 
 Its easiest to understand this through an example:
 
@@ -338,8 +340,8 @@ This lets a prover say "I have a polynomial `f`" and later prove "`f(z) = y`" wi
 
 KZG Commitments work as follows:
 
-- First we commit the polynomial at a secret setup point `τ` (unknown to prover and verifier after setup). We compute a Structured Reference String (SRS): `{ G, τG, τ²G, τ³G, …, τ^{D-1}G }` which is basically the `τ` values at coefficient values, hidden using the field `G`.
-- The prover then commits to `f` by computing `f(τ·G) = c₀·G + c₁·(τG) + c₂·(τ²G) + … = f(τ)·G = f(τ)·G`.
+- First we commit the polynomial at a secret setup point `τ` (unknown to prover and verifier after setup). We compute a Structured Reference String (SRS): `{ G, τG, τ²G, τ³G, …, τ^{D-1}G }` which is basically the `τ` values at coefficient values, hidden using the group generator `G`.
+- The prover commits to `f(X) = Σ cᵢ Xⁱ` as `C = c₀·G + c₁·(τ·G) + c₂·(τ²·G) + … = f(τ)·G`.
 - The verifier then chooses a random challenge point `z` and sends it to the prover.
 - The prover must prove `f(z) = y` without revealing `f`, to do this notice the following: 
     - `f(z) = y <-> f(z) - y = 0 <-> g(X) = f(X) - y = 0 @ X = z`
@@ -354,10 +356,13 @@ KZG Commitments work as follows:
     <-> f(τ) - y = (f(τ) - y)
     <-> 0 = 0
     ```  
- 
+
+*Note:* the verifier does **not** know `τ` (it is toxic waste from setup). Real KZG checks the same identity with a **pairing**, e.g. `e(C − y·G, h) = e(π, (τ − z)·h)`, using public SRS elements — never by plugging `τ` into a field equation. The `verify_open` code below is a **pedagogical toy** that pretends `τ` is known; it only shows the algebra and is not secure KZG.
+
 **Why this works:**  
 - an honest prover who knows `f` can always form the exact `q` and pass  
 - if the prover claims a wrong y for the committed f, then X − z does not divide f(X) − y, so no honest `q` exists; and can't produce a valid `π` except with negligible probability
+- when openings check a poly identity like `G − Z_H·Q ≡ 0`, **Schwartz–Zippel** says one random `z` fails only with probability `≤ deg/|𝔽|` if the identity is false. KZG only authenticates the opened values; SZ is why one random point tests the whole identity.
 - coefficients stay hidden: only `C`, `y`, and `π` leave the prover  
 
 ```python
@@ -372,9 +377,11 @@ def verify_open(C, z, y, pi, setup):
     return (C - y) == (pi * (setup["tau"] - z))
 ```
 
+*Note:* KZG gives a succinct, sound way to check polynomial identities however, the verifier still sees evaluations. Real ZK-PLONK blinds witness polynomials so openings are simulatable without knowing `x`. This tutorial focuses on soundness and treats full ZK as an extra masking layer on the same algebraic checks.
+
 ## PLONK Prove/Verify Pipeline
 
-To put it all together, we run KZG on every polynomial we built, and to verify we check gate and copy identities at one challenge point `z`. This proves we know a valid trace of the circuit without revealing the circuit itself.
+To put it all together, we run KZG on every polynomial we built, and to verify we check gate and copy identities at one challenge point `z`. This proves we know a **valid witness** for the public circuit — e.g. a private `x` with `x · x = y` — **without revealing `x`**. (The circuit itself — selectors, wiring, public `y` — is known to the verifier.)
 
 ### Polynomials we commit
 
@@ -394,6 +401,10 @@ Vanishing polys (not committed — verifier can evaluate them):
 - `Z_H(X) = X^4 − 1` (zero on row domain `H`)
 - `Z_cp(X) = X^{12} − 1` (zero on placement domain)
 
-And that is how we prove we have a valid trace of the program, i.e. we know a `x` which would outputs `x * x = y` without revealing `x`.
+And that is how we prove a valid execution trace — we know a private `x` such that `x * x = y` — without revealing `x`.
 
-FIN
+## What's simplified vs real PLONK (optional / advanced)
+
+Left out on purpose: full gate equation; real permutation argument; Fiat–Shamir; blinding for ZK; batch openings; pairing/SRS details; selector preprocessing.
+
+**Naming:** `G(X)` = gate poly; `G` in KZG = group generator; `C(X)` = output column; `C_cp` = copy constraint; `C` in KZG = commitment.
