@@ -58,21 +58,36 @@ we can also represent our circuit as a matrix or something like a computer trace
 | 0 | 0 | 0 | 0 | `0 · (anything) = 0` ✓ |
 | 0 | 0 | 0 | 0 | `0 · (anything) = 0` ✓ |
 
-NOTE: since we only have one gate/state, we only care about the first row (the other rows are `padded`)
+NOTE: since we only have one gate/state, we only care about the first row (the other rows are `padded`) but notice it supports much more complicated computations
 
 - Row 0 is the only active gate: it enforces `s_mul · (a · b) = c`, i.e. `7 · 7 = 49`
 - Rows 1–3 are *padding*: `s_mul = 0` turns the gate off, so those values don't matter
 
 Using this matrix, the prover's claim is: **every row of the trace satisfies `s_mul · (a·b − c) = 0`**
 
+To verify this, we can check each gate/row's equality in a loop, pretty straightforward.
+
 ## Part 2 — Identical wires must agree (copy constraints)
 
-- notice how in our equation a and b both represent the same variable, however there are no constraints to ensure this holds.
-- thats what copy constraints do
-- to accomplish this we do a few things:
-  - flatten the trace from N x M row/columns into a N * M x 1 vector called `Wire IDS` which label cells that must hold the same value
-    - for example, in our case `WIRE_IDS = = [x, x, y, ...] = [0, 0, 1, ....]`
+- however, notice in our equation a and b both represent the same variable, x, but we never validate this
+- to accomplish this we'll introduce something called 'copy constraints', which first defines which variables (`a` and `b`) need to be the same in the trace, and then validate it again, alongside the gate check
+  - we'll use 'placement' as our data structure holding the information, and 'wire id' as the ID for the wire defined at 'placement' 
+  - to make things easy, we'll organize the placements as a flat N*M vector representing the trace and the 'wire ids' as the unique ID for each wire
   - then we compute another check, that **all wire_id placements are equal inside the trace** and the public inputs (y) match too
+
+| placement | cell | wire ID | trace value | copy rule |
+|-----------|------|---------|---------------------------|-----------|
+| 0 | row 0, `a` | 0 (`x`, private) | 7 | must equal placement 1 |
+| 1 | row 0, `b` | 0 (`x`, private) | 7 | must equal placement 0 |
+| 2 | row 0, `c` | 1 (`y`, public) | 49 | must equal `public_inputs[0]` |
+| 3–11 | padding rows | −1 (none) | 0 | no copy checks |
+
+- Worked example: wire ID 0 at placements 0 and 1 must both be `7`
+- Wire 0 copy group: placements 0 and 1 both carry `x` → forces `a = b`
+- Wire 1: placement 2 carries `y` → verifier checks `public_inputs[0] == 49`
+- Without wire 0, a dishonest prover could set `a = 7`, `b = 8`, `c = 56` and still pass the gate
+
+NOTE: a simple helper function going from a flat vector index to an output `(row column)` helps index inside the trace
 
 in code, we can represent it as: 
 
@@ -84,21 +99,6 @@ WIRE_IDS = ACTIVE_WIRE_IDS + [-1] * (NUM_PLACEMENTS - len(ACTIVE_WIRE_IDS))
 
 PUBLIC_WIRES = (1,) # wire_id of y
 ```
-
-- Worked example: wire 0 at placements 0 and 1 must both be `7`
-
-| placement | cell | wire ID | trace value | copy rule |
-|-----------|------|---------|---------------------------|-----------|
-| 0 | row 0, `a` | 0 (`x`, private) | 7 | must equal placement 1 |
-| 1 | row 0, `b` | 0 (`x`, private) | 7 | must equal placement 0 |
-| 2 | row 0, `c` | 1 (`y`, public) | 49 | must equal `public_inputs[0]` |
-| 3–11 | padding rows | −1 (none) | 0 | no copy checks |
-
-- Wire 0 copy group: placements 0 and 1 both carry `x` → forces `a = b`
-- Wire 1: placement 2 carries `y` → verifier checks `public_inputs[0] == 49`
-- Without wire 0, a dishonest prover could set `a = 7`, `b = 8`, `c = 56` and still pass the gate
-
-NOTE: a simple helper function going from a flat vector index to an output `(row column)` helps index inside the trace
 
 ## Proof and Verification of Gate and Copy Constraints
 
@@ -124,9 +124,11 @@ For our example, only row 0 matters: `1 · (7·7 − 49) = 0`. Padding rows pass
 ```python
 def check_wire_ids(circuit):
     for wire_id in {0, 1}:          # skip -1 (padding)
+        # indexes into the flat vector
         placements = [p for p, wid in enumerate(WIRE_IDS) if wid == wire_id]
         if len(placements) < 2:
             continue                # wire 1 only appears once — no internal copy
+        # trace values at the placements
         vals = [value_at_placement(circuit, p) for p in placements]
         if any(v != vals[0] for v in vals): # check all have the same value
             return False
@@ -161,24 +163,18 @@ def check_witness(circuit, public_inputs):
     )
 ```
 
-NOTE: the witness is another word for the prover's solution, which we eventually want to make private
-
-| Check | What it catches |
-|-------|-----------------|
-| `check_trace` | wrong multiplication (`7·8 ≠ 56` would fail if `c` were wrong) |
-| `check_wire_ids` | `a ≠ b` cheat (`7` vs `8`) |
-| `check_public_inputs` | prover claims `y = 50` but trace says `49` |
-
 This is an **honest verifier with full trace access** — the prover sends the whole table, verifier runs the three checks. 
 
 ---
 
 ## Part 3 — One polynomial per column
 
-- now we want a faster way to evaluate the gates and copy constraints instead of just loops 
-- for example, we can define `S(X), A(X), B(X), C(X)` from trace columns s_mul, a, b, and c as polynomials we want
-  - we would interpolate on using x values w^i
-  - and the column_i (s_i, a_i, ...) for the y values:
+- while this approach works for simple circuits, for larger circuits, we need a different approach than loops
+- to do this we'll use polynomials
+- for example, we can define `S(X), A(X), B(X), C(X)` from trace columns s_mul, a, b, and c as equivalent polynomials 
+- where for any set of x values, the corresponding y value is equal to the value in the trace, i.e, `S(x_i) = y_i` where `y_i` is the value in the trace value of `s_mul` at row `i`
+
+Note: while can use any `x_i` values to interpolate on (ie, {1, 2, 3, 4}), we get some nice properties when using the roots of unity `ω^i` which you can read more about [here](https://en.wikipedia.org/wiki/Root_of_unity).
 
 | Row `i` | `x_i = ω^i` | `s_mul` | `a` | `b` | `c` |
 |---------|-------------|---------|-----|-----|-----|
@@ -186,8 +182,6 @@ This is an **honest verifier with full trace access** — the prover sends the w
 | 1 | `ω` | 0 | 0 | 0 | 0 |
 | 2 | `ω²` | 0 | 0 | 0 | 0 |
 | 3 | `ω³` | 0 | 0 | 0 | 0 |
-
-Note: we can use any x_i values to interpolate on (ie, {1, 2, 3, 4}), however we get some nice properties when using the roots of unity `ω^i` which we will cover later.
 
 ie, For column `a`, values are `xs = [1, ω, ω², ω³]` and `ys = [7, 0, 0, 0]`, so we define polynomial `A(X)` with **degree < N** such that:
 
@@ -206,13 +200,13 @@ where `x_j = ω^j` and
 L_j(X) = Π_{m≠j} (X - x_m) / (x_j - x_m)
 ```
 
-Notice how L_j(x_j) = 1 and L_j(x_m) = 0 (for m != j), so A(x_j) = a_j for all j.
+While theres a lot of indicies to get confused on, notice how L_j(x_j) = 1 and L_j(x_m) = 0 (for m != j), so A(x_j) = a_j for all j. This means we have defined `A(X)` to map to the trace values `a_i` using the `x_i` values `ω^i`.
 
 Similarly define `S(X)` from selectors, `B(X)` from `b`, `C(X)` from `c`.
 
-Now we can **redefine the constraints as one polynomial: `G(X) = S(X)·(A(X)·B(X) − C(X))`**. 
+Now we can **redefine the gate constraints as one polynomial: `G(X) = S(X)·(A(X)·B(X) − C(X))`**. 
 
-To confirm the constraints hold we just need to ensure `G(X) = 0 for all x in the domain H`. The easiest way to check this is again by loop for each x value. 
+To confirm the constraints hold we just need to ensure `G(X) = 0 for all x in the domain H (for all x ∈ [1, ω, ω², ω³])`. The easiest way to check this is again by loop for each x value. 
 
 ```python 
 # equivalent to check_trace in previous chapter
@@ -220,13 +214,13 @@ def check_poly_trace(circuit, public_inputs):
     # compute
     S, A, B, C = interpolate_polynomials(circuit, DOMAIN)
     # verify
-    for x in DOMAIN:
+    for x in DOMAIN: # for x in [1, ω, ω², ω³]:
         if S(x) * (A(x) * B(x) - C(x)) != 0:
             return False
     return True
 ```
 
-With a little more work and introducing a few more concepts, *we can actually do it with a single evaluation*.
+Now, with a little more work and introducing a few more concepts, *we can actually do it with a single evaluation*.
 
 ## Vanishing polynomial
 
@@ -238,9 +232,9 @@ On a multiplicative subgroup of order `N` we can define the vanishing polynomial
 Z_H(X) = Π_{i=0}^{N-1} (X - ω^i) = X^N - 1
 ```
 
-**Notice how `Z_H(x) = 0` for every `x ∈ H` and `Z_H(x) ≠ 0` for typical `x ∉ H`.** This will come in handy.
-
 NOTE: the Vanishing polynomial factors to `Z_H(X) = X^N − 1` is zero exactly on `H` when using the roots of unity `ω^i`, which is why we chose them instead of a simpler `{0, 1, 2, 3}`.
+
+**Notice how `Z_H(x) = 0` for every `x ∈ H` and `Z_H(x) ≠ 0` for typical `x ∉ H`.** This will come in handy.
 
 In our example, `N = 4`, so:
 ```
@@ -249,19 +243,22 @@ Z_H(X) = X^4 - 1
 
 ## The Factor Theorem and The Quotient Polynomial
 
-The main thing we need to understand is that for polynomials, the factor theorem states: 
+The next thing we need to understand, is that the factor theorem states: 
 - **for a polynomial f(x): f(a) = 0 if and only if (x−a) is a factor of f(x)**
-- Another way of saying this is: **if f(a) = 0, then there exists a quotient q(x) such that, f(X) = (X − a) · q(X) for some polynomial q(X) = f(X) / (X − a)**
-- Since we want to prove a polynomail `G(X) = 0` for all `x ∈ H` AND since `Z_H(X) = Π_{i=0}^{N-1} (X - ω^i)` i.e, the multiplication of `N` terms which are zero across all `x ∈ H`
-  - *then* if we find a `Q(X)` such that `G(X) = Z_H(X) · Q(X)` as polynomials, then G(x) = 0 for all x ∈ H — so every gate constraint in G is satisfied at once.
-- Honest witness → division succeeds; broken witness → nonzero remainder
+- Another way of saying this is: **if f(a) = 0, then there exists a quotient q(x) such that, f(X) = (X − a) · q(X) for some polynomial q(X)** 
+  - which is exactly q(X) = f(X) / (X − a) 
 
-- checking the polynomial equality can be done as follows:
+- To use this, remember we want `G(ωⁱ) = 0` at every valid trace row `ωⁱ ∈ H`. If `G` vanishes at a single point `w`, then there is a polynomial `Q` such that `G(X) = (X − w) ⋅ Q(X)`. 
+- If the constraints hold on the whole domain `H = {1, ω, …, ω^(N−1)}`, then `G` vanishes at every `ωⁱ`, so we can factor out the full product of those roots: `G(X) = ∏ᵢ₌₀^(N−1) (X − ωⁱ) ⋅ Q(X)`. 
+- That product is exactly the vanishing polynomial `Z_H` of `H`: `G(X) = Z_H(X) ⋅ Q(X)`.
+- Notice how if we can find a `Q(X)` such that `G(X) = Z_H(X) ⋅ Q(X)`, then `G(x) = 0` for all `x ∈ H` — **so every gate constraint in `G` is satisfied at once.**
+
+- computing and verifying the polynomial equality can be done as follows:
 
 ```python 
-G = compute_gate_poly(circuit)
-Z = poly.vanishing_poly(n)
-Qg, Rg = poly.div_poly(G, Z)
+G = compute_gate_poly(circuit) # compute G
+Z = poly.vanishing_poly(n) # compute Z
+Qg, Rg = poly.div_poly(G, Z) # compute Q = G / Z, R = G % Z
 
 constraint_holds = ( # If true, G(x) = 0 for all x ∈ H
     not any(c != 0 for c in Rg)  # exact division
@@ -273,10 +270,9 @@ constraint_holds = ( # If true, G(x) = 0 for all x ∈ H
 
 ## Part 4 — Copy constraints as a permutation polynomial
 
-- now we need to represent our copy constraints as a polynomial
-- the way we do this is with a permutation σ, which **reorders the traces so copies line up**
-- for example, if we have the same WIRE_ID at p0 and p1, we use a cycle between the values, then `σ(p0) = p1` and `σ(p1) = p0` (a cycle of length 2)
-- our new reordered set `w^σ` would have `p1` where `p0` was and `p0` where `p1` was
+- next, we need to represent our copy constraints as a polynomial
+- the way we do this is with a permutation σ, which **reorders the traces so copies are organized into a cycle**
+- its easiest to understand this through an example:
 
 For our square circuit, only wire 0 has two placements (so only one nontrivial cycle):
 
@@ -292,16 +288,20 @@ value w[p]  (values in w):    7     7    49     0 …
 w[σ(p)]:       7     7    49     0 …
 ```
 
+- we have the same `wire ids` at `p0` and `p1` (in set `W`), we can use a permutation cycle, `σ`, such that `σ(p0) = p1` and `σ(p1) = p0` (a cycle of length 2)
+  - then we could validate `w[σ(p)] == w[p]` for every `p` in `W`
+  - i.e., `w[σ(p0)] = w[p0] <-> w[p1] = w[p0]` and `w[σ(p1)] = w[p1] <-> w[p0] = w[p1]`
+
 Where:
-- **`w`** — flat list of trace values at each placement (length 12)
+- **`w`** — flat list of trace values at each placement
 - **`σ`** — permutation of placement indices; which cycles cells that share a wire ID
 - **`w^σ`** — same values, reordered: `w^σ[p] = w[σ(p)]`
 - Copy check: **`w[p] = w^σ[p]` for every placement `p`**
 
 Notice how if the copy constraints are held, then `w[σ] == w`
 
-we can then follow the procedure we using in the previous sections and create a polynomial for these two lists using the values as y-values and the roots of unity as x-values, and then ensure equality holds across the domain, that is: 
-- `W(X) = W^σ(X)`
+we can then follow the procedure we using in the previous sections and create a polynomial for these values using lagrange interpolation and the roots of unity, and then ensure equality holds across the entire domain: 
+- `W(X) = W^σ(X)` (we want this to hold across the entire domain `x ∈ H`)
 - `W(X) - W^σ(X) = 0`
 - `W(X) - W^σ(X) = C(X)`
 
@@ -317,30 +317,24 @@ NOTE: here `C(X)` is the **copy constraint** polynomial `W(X) − W^σ(X)`, not 
 
 ## Efficient Communication: KZG
 
-- Problem: sending all polynomial coefficients is huge for real traces
-- Solution: KZG commitments
+- now we have a way to represent and prove our trace holds with a polynomial commitment scheme, however, sending all polynomial coefficients is huge for real traces and still leaks information about the trace
+- the solution is to use a **KZG commitment scheme**
   - this lets a prover say "I have a polynomial `f`" and later prove "`f(z) = y`" without sending all coefficients
-- first we commit the polynomial at a secret setup point `τ` (unknown to prover and verifier after setup)
-- **SETUP (trusted):** publish powers of `τ` in a group with generator `G`  
-  - `SRS = { G, τG, τ²G, τ³G, …, τ^{D-1}G }`  
-  - nobody keeps `τ` after this (or the scheme is broken)
-- **PROVER — commit:** hide the polynomial as one group element  
-  - `C = c₀·G + c₁·(τG) + c₂·(τ²G) + … = f(τ)·G`  
-  - NOTE: same as evaluating `f(X) = c₀ + c₁·X + c₂·X² + …` at `X = τ`, without revealing `τ` or the coeffs  
-- **VERIFIER → PROVER:** chooses a random challenge point `z` and sends it to the prover  
-  - (or we can use Fiat–Shamir to have a non-interactive `z` value)
-- **PROVER — open at `z`:** prove `f(z) = y` without sending all coeffs  
+  - we'll understand how its useful in our context after
 
-  - the prover must supply a valid quotient (with no remainder) for `f(x) - y / (x - z)`
-    - notice the top is `g(x) = f(x) - y` which we know `z` is a root of since `g(z) = f(z) - y = y - y = 0`
-    - since its a root by the factor theorem we know `(x - z)` is a factor of `g(x)`
-    - and therefore there exists a quotient `g(x) / (x - z)` without remainder 
-    - and this quotient would only be feasible to compute if the prover knew `f(x)`
-  - so the prover computes `y` and then builds the quotient `q(X) = (f(X) − y) / (X − z)`
-  - then the prover commits to the quotient: `π = q(τ)·G`
-  - and sends the opening `(y, π)` to the verifier
-- **VERIFIER — check opening:** does not know `τ` or the coeffs, only `C`, `z`, `y`, `π`  
-  - Algebraic identity (evaluate `f(X) − y = q(X)·(X − z)` at `X = τ`):  
+---
+
+- first we commit the polynomial at a secret setup point `τ` (unknown to prover and verifier after setup)
+  - to do this we compute a Structured Reference String (SRS): `{ G, τG, τ²G, τ³G, …, τ^{D-1}G }` which is basically the `τ` values at coefficient values, hidden using the field `G`
+  - the prover then commits to `f` by computing `f(τ·G) = c₀·G + c₁·(τG) + c₂·(τ²G) + … = f(τ)·G = f(τ)·G`  
+  - the verifier then chooses a random challenge point `z` and sends it to the prover  
+  - the prover must prove `f(z) = y` without revealing `f`, to do this notice the following: 
+    - `f(z) = y <-> f(z) - y = 0 <-> g(x) = f(x) - y = 0 @ x = z`
+    - so by the factor theorem there must exist a quotient `q(x)` such that `g(x) = (x - z) * q(x)`
+    - so the prover can compute `y` and then compute the quotient `q(x) = g(x) / (x - z) = (f(x) - y) / (x - z)` and if there is no remainder in the quotient then the equality `f(z) = y` holds
+    - so the prover compute `y`, then computes `q(x)` and computes `π = q(τ)·G`
+    - the prover then sends the opening `(y, π)` to the verifier
+  - the verifier then verifies the algebraic identity (evaluate `f(X) − y = q(X)·(X − z)` at `X = τ`):  
     ```
     f(τ) − y = q(τ) · (τ − z)
     <-> f(τ) − y = (f(τ) - y) / (τ - z) · (τ − z)
